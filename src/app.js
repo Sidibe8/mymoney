@@ -1,7 +1,7 @@
+// src/app.js - Version modifiée pour Vercel
 const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
-const morgan = require("morgan");
 const dotenv = require("dotenv");
 
 dotenv.config();
@@ -14,8 +14,16 @@ const userRoutes = require("./routes/userRoutes");
 
 const app = express();
 
-// Connexion à MongoDB
-connectDB();
+// Connexion à MongoDB (sera établie à chaque requête en serverless)
+// On utilise un cache pour éviter de reconnecter à chaque fois
+let isConnected = false;
+
+const connectToDatabase = async () => {
+  if (!isConnected) {
+    await connectDB();
+    isConnected = true;
+  }
+};
 
 // Middleware
 app.use(
@@ -31,7 +39,19 @@ app.use(
   }),
 );
 app.use(express.json());
-app.use(morgan("dev"));
+
+// Middleware pour connecter DB avant chaque requête
+app.use(async (req, res, next) => {
+  try {
+    await connectToDatabase();
+    next();
+  } catch (error) {
+    console.error("Database connection error:", error);
+    res
+      .status(500)
+      .json({ message: "Erreur de connexion à la base de données" });
+  }
+});
 
 // Routes API
 app.use("/api/auth", authRoutes);
@@ -40,11 +60,25 @@ app.use("/api/transactions", transactionRoutes);
 app.use("/api/user", userRoutes);
 
 // Health check
-app.get("/health", (req, res) => {
+app.get("/api/health", (req, res) => {
   res.json({
     status: "OK",
     timestamp: new Date(),
     uptime: process.uptime(),
+  });
+});
+
+// Route racine
+app.get("/", (req, res) => {
+  res.json({
+    message: "API MyMoney - Mobile Money Application",
+    version: "1.0.0",
+    endpoints: {
+      auth: "/api/auth",
+      wallet: "/api/wallet",
+      transactions: "/api/transactions",
+      user: "/api/user",
+    },
   });
 });
 
@@ -53,7 +87,7 @@ app.use("*", (req, res) => {
   res.status(404).json({ message: "Route non trouvée" });
 });
 
-// Gestionnaire d'erreurs global
+// Gestionnaire d'erreurs
 app.use((err, req, res, next) => {
   console.error("❌ Erreur:", err.stack);
   res.status(500).json({
@@ -61,52 +95,14 @@ app.use((err, req, res, next) => {
     error: process.env.NODE_ENV === "development" ? err.message : undefined,
   });
 });
-app.use((req, res, next) => {
-  console.log("======================================");
-  console.log(`📥 REQUEST: ${req.method} ${req.originalUrl}`);
-  console.log("📌 Headers:", req.headers);
-  console.log("📦 Body:", req.body);
-  console.log("🌐 IP:", req.ip);
-  console.log("======================================");
-  next();
-});
 
-const PORT = process.env.PORT || 3000;
-const http = require("http");
-const server = http.createServer(app);
+// Pour Vercel serverless
+module.exports = app;
 
-// Socket.IO
-const { Server } = require("socket.io");
-const io = new Server(server, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"],
-  },
-});
-
-// Expose io via app so controllers can access it
-app.set("io", io);
-
-io.on("connection", (socket) => {
-  console.log("📡 Client connecté", socket.id);
-
-  socket.on("join", ({ userId }) => {
-    if (userId) {
-      const room = `user:${userId}`;
-      socket.join(room);
-      console.log(`Socket ${socket.id} rejoint ${room}`);
-    }
+// Pour le développement local
+if (process.env.NODE_ENV !== "production") {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    console.log(`🚀 Serveur démarré sur http://localhost:${PORT}`);
   });
-
-  socket.on("disconnect", () => {
-    console.log("📴 Client déconnecté", socket.id);
-  });
-});
-
-server.listen(PORT, () => {
-  console.log(
-    `\n  🚀 Serveur MyMoney démarré !\n  📡 Port: ${PORT}\n  🔗 http://localhost:${PORT}\n  ❤️  Health: http://localhost:${PORT}/health\n  `,
-  );
-});
-
-module.exports = { app, io, server };
+}
